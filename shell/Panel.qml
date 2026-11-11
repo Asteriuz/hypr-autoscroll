@@ -139,6 +139,7 @@ Panel {
     bar: root.bar
     text: root.icon
     active: root.middleModeEnabled
+    activeColor: root.bar.foreground
     dimmed: !root.pluginAvailable || !root.pluginEnabled || !root.middleModeEnabled
     tooltipText: root.pluginAvailable
       ? (root.middleModeEnabled ? "Autoscroll on" : "Autoscroll off")
