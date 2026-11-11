@@ -1,4 +1,5 @@
 #include "button_state.hpp"
+#include "click_state.hpp"
 #include "control.hpp"
 #include "scroll_math.hpp"
 
@@ -48,6 +49,8 @@ namespace {
         SP<Config::Values::CBoolValue>  enabled;
         SP<Config::Values::CBoolValue>  directActivation;
         SP<Config::Values::CIntValue>   button;
+        SP<Config::Values::CIntValue>   clickPassThroughMs;
+        SP<Config::Values::CFloatValue> clickPassThroughDistance;
         SP<Config::Values::CFloatValue> deadZone;
         SP<Config::Values::CFloatValue> sensitivity;
         SP<Config::Values::CFloatValue> acceleration;
@@ -67,6 +70,7 @@ namespace {
         bool                    sentHorizontal = false;
         bool                    sentVertical   = false;
         Vector2D                anchor;
+        Time::steady_tp         activationTime;
         WP<CWLSurfaceResource>  target;
         Time::steady_tp         lastTick;
         SP<CEventLoopTimer>     timer;
@@ -144,6 +148,24 @@ namespace {
             g_pInputManager->simulateMouseMovement();
     }
 
+    // Replays a quick middle click that was swallowed by activation, so the
+    // application still sees press+release (tab close, paste, etc.).
+    void replayActivationClick(const uint32_t button) {
+        const auto target = state.target.lock();
+
+        deactivate(false);
+
+        if (!target || g_pSeatManager->m_state.pointerFocus.lock() != target) {
+            g_pInputManager->simulateMouseMovement();
+            return;
+        }
+
+        const auto timeMs = eventTimeMs();
+        g_pSeatManager->sendPointerButton(timeMs, button, WL_POINTER_BUTTON_STATE_PRESSED);
+        g_pSeatManager->sendPointerButton(timeMs, button, WL_POINTER_BUTTON_STATE_RELEASED);
+        g_pSeatManager->sendPointerFrame();
+    }
+
     bool activate() {
         if (!config.enabled->value() || state.active || g_pInputManager->isLocked() ||
             g_pInputManager->isConstrained()) {
@@ -156,6 +178,7 @@ namespace {
 
         state.active         = true;
         state.anchor         = pointerPosition();
+        state.activationTime = Time::steadyNow();
         state.target         = target;
         state.lastTick       = Time::steadyNow();
         state.sentHorizontal = false;
@@ -362,6 +385,14 @@ namespace {
         config.button = makeShared<Config::Values::CIntValue>(
             "plugin:hypr_autoscroll:button", "Linux input button code used to activate autoscroll", BTN_MIDDLE,
             Config::Values::SIntValueOptions{.min = BTN_LEFT, .max = 0x2ff});
+        config.clickPassThroughMs = makeShared<Config::Values::CIntValue>(
+            "plugin:hypr_autoscroll:click_pass_through_ms",
+            "Maximum press duration for a quick middle click to pass through to the application", 250,
+            Config::Values::SIntValueOptions{.min = 0, .max = 2000});
+        config.clickPassThroughDistance = makeShared<Config::Values::CFloatValue>(
+            "plugin:hypr_autoscroll:click_pass_through_distance",
+            "Maximum pointer displacement for a quick middle click to pass through to the application", 20.0F,
+            Config::Values::SFloatValueOptions{.min = 0.0F, .max = 500.0F});
         config.deadZone = makeShared<Config::Values::CFloatValue>(
             "plugin:hypr_autoscroll:dead_zone", "Pointer distance that produces no scrolling",
             static_cast<float>(Autoscroll::DEFAULT_DEAD_ZONE),
@@ -389,6 +420,8 @@ namespace {
         HyprlandAPI::addConfigValueV2(pluginHandle, config.enabled);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.directActivation);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.button);
+        HyprlandAPI::addConfigValueV2(pluginHandle, config.clickPassThroughMs);
+        HyprlandAPI::addConfigValueV2(pluginHandle, config.clickPassThroughDistance);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.deadZone);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.sensitivity);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.acceleration);
@@ -402,6 +435,27 @@ namespace {
         state.buttonListener = Event::bus()->m_events.input.mouse.button.listen(
             [](IPointer::SButtonEvent event, Event::SCallbackInfo& info) {
                 const auto activationButton = static_cast<uint32_t>(config.button->value());
+
+                // A short middle click without movement passes through to the
+                // application instead of leaving a scroll session behind.
+                if (state.active) {
+                    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        Time::steadyNow() - state.activationTime)
+                                               .count();
+                    const auto displacement = pointerPosition().distance(state.anchor);
+
+                    if (Autoscroll::decideClickPassThrough(state.active, event.button == activationButton,
+                                                           event.state == WL_POINTER_BUTTON_STATE_RELEASED,
+                                                           elapsedMs,
+                                                           static_cast<int64_t>(config.clickPassThroughMs->value()),
+                                                           displacement,
+                                                           static_cast<double>(config.clickPassThroughDistance->value()))) {
+                        state.swallowedButton.reset();
+                        info.cancelled = true;
+                        replayActivationClick(activationButton);
+                        return;
+                    }
+                }
 
                 const auto swallowedButtonDecision = Autoscroll::decideSwallowedButtonEvent(
                     state.swallowedButton && event.button == *state.swallowedButton, state.middleModeEnabled,

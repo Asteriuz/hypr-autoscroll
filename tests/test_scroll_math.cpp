@@ -1,4 +1,5 @@
 #include "../src/button_state.hpp"
+#include "../src/click_state.hpp"
 #include "../src/control.hpp"
 #include "../src/scroll_math.hpp"
 
@@ -53,6 +54,22 @@ int main() {
     const auto pendingPressWhileActive = Autoscroll::decideSwallowedButtonEvent(true, false, true, false);
     assert(pendingPressWhileActive.cancelEvent);
     assert(!pendingPressWhileActive.clearButton);
+
+    // Quick middle click pass-through: active + activation button + released.
+    assert(Autoscroll::decideClickPassThrough(true, true, true, 120, 250, 3.0, 20.0));
+    // Too slow.
+    assert(!Autoscroll::decideClickPassThrough(true, true, true, 400, 250, 3.0, 20.0));
+    // Moved too far (drag).
+    assert(!Autoscroll::decideClickPassThrough(true, true, true, 120, 250, 42.0, 20.0));
+    // Feature disabled.
+    assert(!Autoscroll::decideClickPassThrough(true, true, true, 120, 0, 3.0, 20.0));
+    // Wrong button.
+    assert(!Autoscroll::decideClickPassThrough(true, false, true, 120, 250, 3.0, 20.0));
+    // Not active / press instead of release.
+    assert(!Autoscroll::decideClickPassThrough(false, true, true, 120, 250, 3.0, 20.0));
+    assert(!Autoscroll::decideClickPassThrough(true, true, false, 120, 250, 3.0, 20.0));
+    // Exact limits still pass through.
+    assert(Autoscroll::decideClickPassThrough(true, true, true, 250, 250, 20.0, 20.0));
 
     const Autoscroll::ScrollCurve defaults;
     assert(near(defaults.sensitivity, 4.0));
