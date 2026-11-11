@@ -6,9 +6,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <format>
 #include <optional>
 #include <stdexcept>
@@ -51,7 +48,6 @@ namespace {
     struct ConfigValues {
         SP<Config::Values::CBoolValue>  enabled;
         SP<Config::Values::CBoolValue>  directActivation;
-        SP<Config::Values::CBoolValue>  indicator;
         SP<Config::Values::CIntValue>   button;
         SP<Config::Values::CIntValue>   clickPassThroughMs;
         SP<Config::Values::CFloatValue> clickPassThroughDistance;
@@ -75,9 +71,6 @@ namespace {
         bool                    sentVertical   = false;
         Vector2D                anchor;
         Time::steady_tp         activationTime;
-        std::string             lastStateWritten;
-        std::filesystem::path   stateDir;
-        bool                    stateDirReady = false;
         WP<CWLSurfaceResource>  target;
         Time::steady_tp         lastTick;
         SP<CEventLoopTimer>     timer;
@@ -141,9 +134,6 @@ namespace {
             g_pSeatManager->sendPointerFrame();
     }
 
-    void deactivate(const bool restorePointerFocus);
-    void updateStateFile();
-
     void deactivate(const bool restorePointerFocus) {
         if (!state.active)
             return;
@@ -156,8 +146,6 @@ namespace {
 
         if (restorePointerFocus)
             g_pInputManager->simulateMouseMovement();
-
-        updateStateFile();
     }
 
     // Replays a quick middle click that was swallowed by activation, so the
@@ -176,55 +164,6 @@ namespace {
         g_pSeatManager->sendPointerButton(timeMs, button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(timeMs, button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-    }
-
-    // Publishes the live session state (anchor, scroll direction) next to the
-    // runtime dir so visual indicators (e.g. a Quickshell overlay) can mirror
-    // the session without polling hyprctl.
-    void updateStateFile() {
-        if (!config.indicator->value())
-            return;
-
-        const char* runtimeDir = getenv("XDG_RUNTIME_DIR");
-        if (!runtimeDir)
-            return;
-
-        if (!state.stateDirReady) {
-            std::error_code ec;
-            state.stateDir = std::filesystem::path(runtimeDir) / "hypr-autoscroll";
-            std::filesystem::create_directories(state.stateDir, ec);
-            if (ec)
-                return;
-            state.stateDirReady = true;
-        }
-
-        std::string json;
-        if (state.active) {
-            const auto   displacement = pointerPosition() - state.anchor;
-            const double deadZone     = config.deadZone->value();
-            const char*  dirV         = displacement.y < -deadZone ? "up" : (displacement.y > deadZone ? "down" : "none");
-            const char*  dirH = displacement.x < -deadZone ? "left" : (displacement.x > deadZone ? "right" : "none");
-            json = std::format(R"({{"active":true,"anchor":[{:.0f},{:.0f}],"dirV":"{}","dirH":"{}","horizontal":{},"vertical":{}}})", state.anchor.x,
-                               state.anchor.y, dirV, dirH, config.horizontal->value() ? "true" : "false",
-                               config.vertical->value() ? "true" : "false");
-        } else {
-            json = R"({"active":false})";
-        }
-
-        if (json == state.lastStateWritten)
-            return;
-
-        state.lastStateWritten = json;
-
-        std::error_code ec;
-        const auto      temp = state.stateDir / "state.tmp";
-        {
-            std::ofstream stream(temp, std::ios::trunc);
-            if (!stream.good())
-                return;
-            stream << json << "\n";
-        }
-        std::filesystem::rename(temp, state.stateDir / "state", ec);
     }
 
     bool activate() {
@@ -247,8 +186,6 @@ namespace {
 
         setAutoscrollCursor();
         state.timer->updateTimeout(std::chrono::milliseconds(config.frameIntervalMs->value()));
-
-        updateStateFile();
 
         return true;
     }
@@ -291,7 +228,6 @@ namespace {
         state.lastTick       = now;
 
         const Vector2D displacement = pointerPosition() - state.anchor;
-        updateStateFile();
         const auto     curve        = currentCurve();
         const double   horizontalDelta =
             config.horizontal->value() ? Autoscroll::deltaForFrame(displacement.x, elapsed, curve) : 0.0;
@@ -446,8 +382,6 @@ namespace {
                                                                          "Enable the autoscroll plugin", true);
         config.directActivation = makeShared<Config::Values::CBoolValue>(
             "plugin:hypr_autoscroll:direct_activation", "Start with middle-button autoscroll mode enabled", true);
-        config.indicator = makeShared<Config::Values::CBoolValue>(
-            "plugin:hypr_autoscroll:indicator", "Publish the live session state for visual indicators", true);
         config.button = makeShared<Config::Values::CIntValue>(
             "plugin:hypr_autoscroll:button", "Linux input button code used to activate autoscroll", BTN_MIDDLE,
             Config::Values::SIntValueOptions{.min = BTN_LEFT, .max = 0x2ff});
@@ -485,7 +419,6 @@ namespace {
 
         HyprlandAPI::addConfigValueV2(pluginHandle, config.enabled);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.directActivation);
-        HyprlandAPI::addConfigValueV2(pluginHandle, config.indicator);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.button);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.clickPassThroughMs);
         HyprlandAPI::addConfigValueV2(pluginHandle, config.clickPassThroughDistance);
@@ -648,9 +581,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     registerListeners();
     HyprlandAPI::reloadConfig();
-
-    // Clear any stale session state left behind by a previous compositor.
-    updateStateFile();
 
     return {PLUGIN_NAME, "Windows-style middle-click autoscrolling", "hypr-autoscroll contributors", "0.3.2"};
 }
